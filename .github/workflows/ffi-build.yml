@@ -1,13 +1,6 @@
 name: Direct FFI Build
 
 on:
-  push:
-    branches:
-      - feature/direct-ffi-integration
-    paths:
-      - 'idb_direct/**'
-      - 'rust-client-simple/**'
-      - '.github/workflows/ffi-build.yml'
   pull_request:
     branches:
       - main
@@ -38,7 +31,7 @@ jobs:
         override: true
         
     - name: Cache Rust dependencies
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: |
           ~/.cargo/registry
@@ -74,7 +67,7 @@ jobs:
         tar -czf direct-ffi-${{ github.sha }}.tar.gz -C dist ffi
         
     - name: Upload FFI artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: direct-ffi-macos
         path: direct-ffi-${{ github.sha }}.tar.gz
