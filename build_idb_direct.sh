@@ -39,7 +39,7 @@ clang -c \
     -I./XCTestBootstrap \
     -F"$FRAMEWORK_DIR" \
     -o "$BUILD_DIR/idb_direct.o" \
-    idb_direct/idb_direct_real.m
+    idb_direct/idb_direct_real_adaptive.m
 
 # Compile stubs
 clang -c \
