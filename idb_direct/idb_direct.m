@@ -1,11 +1,11 @@
 #import <Foundation/Foundation.h>
-#import "FBControlCore.h"
-#import "FBFuture.h"
-#import "FBSimulatorControl.h"
-#import "FBSimulator.h"
-#import "FBSimulatorHID.h"
-#import "FBSimulatorIndigoHID.h"
-#import "FBDeviceControl.h"
+#import <FBControlCore/FBControlCore.h>
+#import <FBControlCore/FBFuture.h>
+#import <FBSimulatorControl/FBSimulatorControl.h>
+#import <FBSimulatorControl/FBSimulator.h>
+#import <FBSimulatorControl/FBSimulatorHID.h>
+#import <FBSimulatorControl/FBSimulatorIndigoHID.h>
+#import <FBDeviceControl/FBDeviceControl.h>
 #import "idb_direct.h"
 
 // Global state (thread-safe)

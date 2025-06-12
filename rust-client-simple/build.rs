@@ -33,21 +33,11 @@ fn main() {
             .write_to_file(out_path.join("bindings.rs"))
             .expect("Couldn't write bindings!");
         
-        // Compile the Objective-C code
-        cc::Build::new()
-            .file("../idb_direct/idb_direct_simple.m")
-            .flag("-fobjc-arc")
-            .flag(format!("-isysroot{}", sdk_path).as_str())
-            .flag("-I/Users/paul/Projects/arkavo/idb")
-            .flag("-I/Users/paul/Projects/arkavo/idb/.arkavo/idb/Frameworks/FBControlCore.framework/Headers")
-            .flag("-I/Users/paul/Projects/arkavo/idb/.arkavo/idb/Frameworks/FBSimulatorControl.framework/Headers")
-            .flag("-I/Users/paul/Projects/arkavo/idb/.arkavo/idb/Frameworks/FBDeviceControl.framework/Headers")
-            .flag("-F/Users/paul/Projects/arkavo/idb/.arkavo/idb/Frameworks")
-            .flag("-framework")
-            .flag("Foundation")
-            .compile("idb_direct");
+        // Link to the pre-built static library
+        println!("cargo:rustc-link-search=native=../build/lib");
+        println!("cargo:rustc-link-lib=static=idb_direct");
         
-        // Link frameworks - just Foundation for stub
+        // Link frameworks
         println!("cargo:rustc-link-lib=framework=Foundation");
     }
 }
