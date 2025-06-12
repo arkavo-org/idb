@@ -41,12 +41,23 @@ clang -c \
     -o "$BUILD_DIR/idb_direct.o" \
     idb_direct/idb_direct_real.m
 
-# Create static library
-ar rcs "$OUTPUT_DIR/libidb_direct.a" "$BUILD_DIR/idb_direct.o"
+# Compile stubs
+clang -c \
+    -arch arm64 \
+    -mmacosx-version-min=13.0 \
+    -fobjc-arc \
+    -fmodules \
+    -I./idb_direct \
+    -o "$BUILD_DIR/idb_direct_stubs.o" \
+    idb_direct/idb_direct_stubs.m
 
-# Copy header
+# Create static library with both objects
+ar rcs "$OUTPUT_DIR/libidb_direct.a" "$BUILD_DIR/idb_direct.o" "$BUILD_DIR/idb_direct_stubs.o"
+
+# Copy headers
 mkdir -p "$OUTPUT_DIR/include"
 cp idb_direct/idb_direct.h "$OUTPUT_DIR/include/"
+cp idb_direct/idb_direct_extended.h "$OUTPUT_DIR/include/"
 
 echo "✅ Static library built: $OUTPUT_DIR/libidb_direct.a"
 echo "✅ Header file: $OUTPUT_DIR/include/idb_direct.h"

@@ -19,6 +19,12 @@ typedef enum {
     IDB_ERROR_OPERATION_FAILED = -5,
     IDB_ERROR_TIMEOUT = -6,
     IDB_ERROR_OUT_OF_MEMORY = -7,
+    // Extended error codes
+    IDB_ERROR_NOT_IMPLEMENTED = -100,
+    IDB_ERROR_UNSUPPORTED = -101,
+    IDB_ERROR_PERMISSION_DENIED = -102,
+    IDB_ERROR_APP_NOT_FOUND = -103,
+    IDB_ERROR_INVALID_APP_BUNDLE = -104,
 } idb_error_t;
 
 // Device types

@@ -43,6 +43,18 @@ static BOOL load_simulator_kit(void) {
         SimDeviceSetClass = NSClassFromString(@"SimDeviceSet");
         
         if (SimDeviceClass && SimDeviceSetClass) {
+            // Check for API compatibility (Xcode 17+ check)
+            SEL eventSinkSelector = NSSelectorFromString(@"eventSink");
+            SEL sendEventSelector = NSSelectorFromString(@"sendEventWithType:path:error:");
+            
+            if (![SimDeviceClass instancesRespondToSelector:eventSinkSelector] ||
+                ![SimDeviceClass instancesRespondToSelector:sendEventSelector]) {
+                NSLog(@"FATAL: CoreSimulator API has changed - eventSink or sendEvent selectors not found!");
+                NSLog(@"This version of idb_direct is not compatible with this version of Xcode");
+                NSLog(@"Please update idb_direct for the new CoreSimulator API");
+                return;
+            }
+            
             loaded = YES;
         }
     });
@@ -288,7 +300,22 @@ const char* idb_error_string(idb_error_t error) {
     if (index >= 0 && index < sizeof(g_error_strings)/sizeof(g_error_strings[0])) {
         return g_error_strings[index];
     }
-    return "Unknown error";
+    
+    // Handle extended error codes
+    switch (error) {
+        case IDB_ERROR_NOT_IMPLEMENTED:
+            return "Not implemented";
+        case IDB_ERROR_UNSUPPORTED:
+            return "Unsupported";
+        case IDB_ERROR_PERMISSION_DENIED:
+            return "Permission denied";
+        case IDB_ERROR_APP_NOT_FOUND:
+            return "App not found";
+        case IDB_ERROR_INVALID_APP_BUNDLE:
+            return "Invalid app bundle";
+        default:
+            return "Unknown error";
+    }
 }
 
 const char* idb_version(void) {
