@@ -14,6 +14,11 @@ static struct {
     BOOL initialized;
 } g_idb_state = {0};
 
+// Export helper for shared memory implementation
+id g_idb_state_current_device(void) {
+    return g_idb_state.current_device;
+}
+
 // Error string storage
 static const char* g_error_strings[] = {
     [0] = "Success",
