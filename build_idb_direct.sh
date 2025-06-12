@@ -39,7 +39,7 @@ clang -c \
     -I./XCTestBootstrap \
     -F"$FRAMEWORK_DIR" \
     -o "$BUILD_DIR/idb_direct.o" \
-    idb_direct/idb_direct_stub.m
+    idb_direct/idb_direct_real.m
 
 # Create static library
 ar rcs "$OUTPUT_DIR/libidb_direct.a" "$BUILD_DIR/idb_direct.o"

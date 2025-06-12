@@ -54,10 +54,28 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-cargo-
           
+    - name: Get framework cache key
+      id: framework-cache-key
+      run: |
+        # Create a hash of files that affect framework builds
+        echo "hash=$(cat FBSimulatorControl.xcodeproj/project.pbxproj Podfile.lock 2>/dev/null | shasum -a 256 | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+        
+    - name: Cache frameworks
+      uses: actions/cache@v4
+      with:
+        path: build/Build/Products/Debug
+        key: ${{ runner.os }}-frameworks-${{ steps.framework-cache-key.outputs.hash }}
+        restore-keys: |
+          ${{ runner.os }}-frameworks-
+          
     - name: Build frameworks
       run: |
-        echo "Building frameworks..."
-        ./build.sh framework build
+        if [ ! -d "build/Build/Products/Debug/FBControlCore.framework" ]; then
+          echo "Building frameworks..."
+          ./build.sh framework build
+        else
+          echo "Using cached frameworks"
+        fi
         
     - name: Build idb_direct static library
       run: |
@@ -72,6 +90,11 @@ jobs:
         else
           cargo build --features ffi --bin idb-tap-ffi --release
         fi
+        
+    - name: Test C API directly
+      run: |
+        echo "Testing idb_direct C API..."
+        ./build_and_test_idb_direct.sh --ci
         
     - name: Test FFI integration
       run: |

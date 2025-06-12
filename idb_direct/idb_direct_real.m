@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
 #import <objc/runtime.h>
+#import <dlfcn.h>
 #import "idb_direct.h"
 
 // We'll use runtime APIs to interact with SimulatorKit
@@ -177,7 +178,7 @@ idb_error_t idb_touch_event(idb_touch_type_t type, double x, double y) {
         
         // Create touch event using IndigoHID
         SEL touchEventSelector = NSSelectorFromString(@"touchEventWithPhase:point:");
-        NSValue* pointValue = [NSValue valueWithCGPoint:CGPointMake(x, y)];
+        NSValue* pointValue = [NSValue valueWithPoint:NSMakePoint(x, y)];
         
         // This is a simplified version - the actual API might differ
         // In practice, you'd need to reverse engineer the exact method signatures
