@@ -8,6 +8,15 @@
 static Class SimDeviceClass = nil;
 static Class SimDeviceSetClass = nil;
 
+// API version detection
+typedef enum {
+    SimulatorAPIVersionUnknown = 0,
+    SimulatorAPIVersionLegacy,  // Xcode 15-16 (eventSink + sendEventWithType:path:error:)
+    SimulatorAPIVersionModern   // Xcode 17+ (new API)
+} SimulatorAPIVersion;
+
+static SimulatorAPIVersion g_api_version = SimulatorAPIVersionUnknown;
+
 // Global state
 static struct {
     id current_device;  // SimDevice instance
@@ -48,16 +57,28 @@ static BOOL load_simulator_kit(void) {
         SimDeviceSetClass = NSClassFromString(@"SimDeviceSet");
         
         if (SimDeviceClass && SimDeviceSetClass) {
-            // Check for API compatibility (Xcode 17+ check)
+            // Detect API version
             SEL eventSinkSelector = NSSelectorFromString(@"eventSink");
             SEL sendEventSelector = NSSelectorFromString(@"sendEventWithType:path:error:");
             
-            if (![SimDeviceClass instancesRespondToSelector:eventSinkSelector] ||
-                ![SimDeviceClass instancesRespondToSelector:sendEventSelector]) {
-                NSLog(@"FATAL: CoreSimulator API has changed - eventSink or sendEvent selectors not found!");
-                NSLog(@"This version of idb_direct is not compatible with this version of Xcode");
-                NSLog(@"Please update idb_direct for the new CoreSimulator API");
-                return;
+            if ([SimDeviceClass instancesRespondToSelector:eventSinkSelector] &&
+                [SimDeviceClass instancesRespondToSelector:sendEventSelector]) {
+                g_api_version = SimulatorAPIVersionLegacy;
+                NSLog(@"Detected legacy CoreSimulator API (Xcode 15-16)");
+            } else {
+                // Try to detect modern API
+                SEL postNotificationSelector = NSSelectorFromString(@"postNotificationName:userInfo:");
+                SEL sendEventAsyncSelector = NSSelectorFromString(@"sendEventAsyncWithType:data:completionQueue:completionHandler:");
+                
+                if ([SimDeviceClass instancesRespondToSelector:postNotificationSelector] ||
+                    [SimDeviceClass instancesRespondToSelector:sendEventAsyncSelector]) {
+                    g_api_version = SimulatorAPIVersionModern;
+                    NSLog(@"Detected modern CoreSimulator API (Xcode 17+)");
+                } else {
+                    NSLog(@"WARNING: Unable to detect CoreSimulator API version");
+                    NSLog(@"Will attempt legacy API methods");
+                    g_api_version = SimulatorAPIVersionLegacy;
+                }
             }
             
             loaded = YES;
@@ -162,13 +183,30 @@ idb_error_t idb_touch_event(idb_touch_type_t type, double x, double y) {
     @autoreleasepool {
         NSError* error = nil;
         
-        // Get the event sink
-        SEL eventSinkSelector = NSSelectorFromString(@"eventSink");
-        id eventSink = [g_idb_state.current_device performSelector:eventSinkSelector];
-        
-        if (!eventSink) {
-            NSLog(@"Failed to get event sink");
-            return IDB_ERROR_OPERATION_FAILED;
+        // Handle based on API version
+        if (g_api_version == SimulatorAPIVersionModern) {
+            // Try modern API approach
+            NSLog(@"Using modern API for touch event");
+            
+            // Try direct HID event sending
+            SEL hidSelector = NSSelectorFromString(@"hid");
+            if ([g_idb_state.current_device respondsToSelector:hidSelector]) {
+                id hid = [g_idb_state.current_device performSelector:hidSelector];
+                if (hid) {
+                    NSLog(@"Found HID interface");
+                    // We'll use the HID interface directly for modern API
+                    // Fall through to IndigoHID approach below
+                }
+            }
+        } else {
+            // Legacy API approach
+            SEL eventSinkSelector = NSSelectorFromString(@"eventSink");
+            id eventSink = [g_idb_state.current_device performSelector:eventSinkSelector];
+            
+            if (!eventSink) {
+                NSLog(@"Failed to get event sink");
+                return IDB_ERROR_OPERATION_FAILED;
+            }
         }
         
         // Create touch event

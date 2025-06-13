@@ -27,11 +27,6 @@
     [(hid) performHIDEvent:(event)] : \
     [(hid) handleEvent:(event)])
 
-// FBFuture sync helper with timeout
-static BOOL FBIDBWait(FBFuture *future, NSTimeInterval timeout, NSError **error) {
-  id result = [future await:error];
-  return result != nil && (result == NSNull.null || [result isKindOfClass:[NSNull class]]);
-}
 
 // Static variables for state management
 static FBIDBEmbeddedServer *_server = nil;
@@ -115,7 +110,7 @@ idb_error_t idb_tap(double x, double y) {
     FBFuture *future = FBIDB_SEND_HID(hid, event);
     
     // Wait for completion
-    if (!FBIDBWait(future, 5.0, &error)) {
+    if (![FBIDBWait awaitFuture:future timeout:5.0 error:&error]) {
       NSLog(@"idb_direct: Tap failed: %@", error);
       return IDB_ERROR_OPERATION_FAILED;
     }
@@ -142,7 +137,7 @@ idb_error_t idb_screenshot(idb_screenshot_callback callback, void *context) {
       return result;
     }];
     
-    NSData *screenshotData = [future await:&error];
+    NSData *screenshotData = [FBIDBWait awaitFuture:future timeout:10.0 error:&error];
     if (!screenshotData) {
       NSLog(@"idb_direct: Screenshot failed: %@", error);
       return IDB_ERROR_OPERATION_FAILED;
