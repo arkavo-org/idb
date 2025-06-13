@@ -176,8 +176,27 @@ idb_error_t idb_connect_target(const char* udid, idb_target_type_t type) {
                 if ([deviceUDID.UUIDString isEqualToString:targetUdid] || 
                     [targetUdid isEqualToString:@"booted"]) {
                     // Check if booted
-                    SEL stateSelector = NSSelectorFromString(@"state");
-                    NSInteger state = [[device performSelector:stateSelector] integerValue];
+                    // Try to get state using KVC which handles primitive returns better
+                    NSInteger state = 0;
+                    @try {
+                        NSNumber *stateNumber = [device valueForKey:@"state"];
+                        NSLog(@"[DEBUG] stateNumber = %@ (class: %@)", stateNumber, [stateNumber class]);
+                        state = [stateNumber integerValue];
+                    } @catch (NSException *exception) {
+                        NSLog(@"[DEBUG] Exception getting state: %@", exception);
+                        // Fallback to performSelector with NSInvocation
+                        SEL stateSelector = NSSelectorFromString(@"state");
+                        if ([device respondsToSelector:stateSelector]) {
+                            NSMethodSignature *sig = [device methodSignatureForSelector:stateSelector];
+                            NSInvocation *inv = [NSInvocation invocationWithMethodSignature:sig];
+                            [inv setTarget:device];
+                            [inv setSelector:stateSelector];
+                            [inv invoke];
+                            [inv getReturnValue:&state];
+                        }
+                    }
+                    
+                    NSLog(@"[DEBUG] Device state = %ld", state);
                     
                     if (state != 3) { // Booted state
                         NSLog(@"Simulator is not booted (state: %ld)", state);

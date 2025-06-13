@@ -1,0 +1,24 @@
+# Build artifacts
+*.o
+*.a
+*.dylib
+*.so
+
+# Test executables
+test_segfault_repro
+test_connect_comprehensive
+idb_direct_test
+test_shm
+memory_leak_test
+error_mapping_test
+
+# Debug symbols
+*.dSYM/
+
+# macOS
+.DS_Store
+
+# Temporary files
+*.tmp
+*.swp
+*~
