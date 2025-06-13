@@ -10,6 +10,9 @@ This is a fork of Facebook's idb (iOS Development Bridge) maintained for the [ar
 - Custom packaging and static linking modifications
 - Versioned releases for reproducible builds
 - No dependency on user/system installations
+- CoreSimulator compatibility fixes for Xcode 16+
+
+**Important**: This is the arkavo-org fork (github.com/arkavo-org/idb), not the upstream Facebook repository. All PRs should be created against arkavo-org/idb.
 
 ## Project Overview
 
@@ -184,3 +187,7 @@ dist/
 - Use `install_name_tool` to fix framework rpaths if needed
 - Ensure frameworks are codesigned for distribution
 - Check with `otool -L` that all dependencies are resolved
+
+## Development Guidelines
+
+- do not use conventional commits
