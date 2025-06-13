@@ -6,6 +6,14 @@ set -e
 
 echo "Building libidb_direct.a static library..."
 
+# Use VERSION from environment if set, otherwise use default
+if [ -n "$VERSION" ]; then
+    echo "Building with version: $VERSION"
+    VERSION_FLAGS="-DIDB_VERSION=\\\"$VERSION\\\""
+else
+    VERSION_FLAGS=""
+fi
+
 # Build directory
 BUILD_DIR="build/idb_direct"
 OUTPUT_DIR="build/lib"
@@ -38,6 +46,7 @@ clang -c \
     -I./FBDeviceControl \
     -I./XCTestBootstrap \
     -F"$FRAMEWORK_DIR" \
+    $VERSION_FLAGS \
     -o "$BUILD_DIR/idb_direct.o" \
     idb_direct/idb_direct_real_adaptive.m
 
@@ -48,6 +57,7 @@ clang -c \
     -fobjc-arc \
     -fmodules \
     -I./idb_direct \
+    $VERSION_FLAGS \
     -o "$BUILD_DIR/idb_direct_stubs.o" \
     idb_direct/idb_direct_stubs.m
 
@@ -58,6 +68,7 @@ clang -c \
     -fobjc-arc \
     -fmodules \
     -I./idb_direct \
+    $VERSION_FLAGS \
     -o "$BUILD_DIR/idb_direct_shm.o" \
     idb_direct/idb_direct_shm.m
 

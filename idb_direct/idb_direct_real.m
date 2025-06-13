@@ -421,5 +421,9 @@ const char* idb_error_string(idb_error_t error) {
 }
 
 const char* idb_version(void) {
+#ifdef IDB_VERSION
+    return IDB_VERSION;
+#else
     return "0.1.0-real";
+#endif
 }
