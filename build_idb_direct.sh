@@ -9,7 +9,7 @@ echo "Building libidb_direct.a static library..."
 # Use VERSION from environment if set, otherwise use default
 if [ -n "$VERSION" ]; then
     echo "Building with version: $VERSION"
-    VERSION_FLAGS="-DIDB_VERSION=\\\"$VERSION\\\""
+    VERSION_FLAGS="-DIDB_VERSION=\"$VERSION\""
 else
     VERSION_FLAGS=""
 fi

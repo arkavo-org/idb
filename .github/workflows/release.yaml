@@ -44,13 +44,10 @@ jobs:
       run: |
         # Get version from tag or input
         if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          VERSION="${{ github.event.inputs.tag_name }}"
+          export VERSION="${{ github.event.inputs.tag_name }}"
         else
-          VERSION="${{ github.ref_name }}"
+          export VERSION="${{ github.ref_name }}"
         fi
-        
-        # Pass version as a build flag
-        export VERSION
         
         # Build the static library for Direct FFI with version
         ./build_idb_direct.sh
