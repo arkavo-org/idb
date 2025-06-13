@@ -56,6 +56,11 @@ idb_error_t idb_take_screenshot(idb_screenshot_t* screenshot) {
     }
     memset(screenshot->data, 0, screenshot->size);
     screenshot->format = strdup("png");
+    if (!screenshot->format) {
+        free(screenshot->data);
+        screenshot->data = NULL;
+        return IDB_ERROR_OUT_OF_MEMORY;
+    }
     
     return IDB_SUCCESS;
 }

@@ -454,6 +454,16 @@ idb_error_t idb_companion_list_apps(idb_companion_handle_t* handle,
             for (NSUInteger i = 0; i < apps.count; i++) {
                 const char* bundleId = apps[i].bundle.identifier.UTF8String;
                 (*bundle_ids)[i] = strdup(bundleId);
+                if (!(*bundle_ids)[i]) {
+                    // Clean up previously allocated strings
+                    for (NSUInteger j = 0; j < i; j++) {
+                        free((*bundle_ids)[j]);
+                    }
+                    free(*bundle_ids);
+                    *bundle_ids = NULL;
+                    result = IDB_ERROR_OUT_OF_MEMORY;
+                    return;
+                }
             }
         }
     });

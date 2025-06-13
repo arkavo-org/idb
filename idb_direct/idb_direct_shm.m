@@ -34,6 +34,12 @@ idb_error_t idb_shm_create(size_t size, idb_shm_handle_t* handle) {
         return IDB_ERROR_INVALID_PARAMETER;
     }
     
+    // Bounds checking for shared memory size
+    if (size < IDB_SHM_MIN_SIZE || size > IDB_SHM_MAX_SIZE) {
+        NSLog(@"idb_shm: Invalid size %zu (min: %d, max: %d)", size, IDB_SHM_MIN_SIZE, IDB_SHM_MAX_SIZE);
+        return IDB_ERROR_INVALID_PARAMETER;
+    }
+    
     // Allocate handle
     struct idb_shm_handle* h = calloc(1, sizeof(struct idb_shm_handle));
     if (!h) {
@@ -87,6 +93,13 @@ idb_error_t idb_shm_attach(idb_shm_handle_t handle, void** address) {
         return IDB_ERROR_INVALID_PARAMETER;
     }
     
+    // Bounds check the handle size
+    if (handle->size < IDB_SHM_MIN_SIZE || handle->size > IDB_SHM_MAX_SIZE) {
+        NSLog(@"idb_shm: Invalid handle size %zu (min: %d, max: %d)", 
+              handle->size, IDB_SHM_MIN_SIZE, IDB_SHM_MAX_SIZE);
+        return IDB_ERROR_INVALID_PARAMETER;
+    }
+    
     mach_vm_address_t addr = 0;
     kern_return_t kr = mach_vm_map(
         mach_task_self(),
@@ -134,7 +147,15 @@ idb_error_t idb_shm_detach(void* address) {
     );
     
     if (kr != KERN_SUCCESS) {
+        NSLog(@"idb_shm: Failed to get memory region info: %s", mach_error_string(kr));
         return IDB_ERROR_OPERATION_FAILED;
+    }
+    
+    // Bounds check the region size
+    if (size < IDB_SHM_MIN_SIZE || size > IDB_SHM_MAX_SIZE) {
+        NSLog(@"idb_shm: Invalid region size %zu during detach (min: %d, max: %d)", 
+              size, IDB_SHM_MIN_SIZE, IDB_SHM_MAX_SIZE);
+        return IDB_ERROR_INVALID_PARAMETER;
     }
     
     // Unmap the memory
@@ -163,6 +184,104 @@ idb_error_t idb_shm_destroy(idb_shm_handle_t handle) {
 
 const char* idb_shm_get_key(idb_shm_handle_t handle) {
     return handle ? handle->key : NULL;
+}
+
+#pragma mark - Validation Functions
+
+uint32_t idb_shm_calculate_checksum(const idb_shm_screenshot_t* screenshot) {
+    if (!screenshot) {
+        return 0;
+    }
+    
+    // Simple checksum of critical fields (excluding checksum field itself)
+    uint32_t checksum = 0;
+    checksum ^= (uint32_t)(screenshot->magic >> 32);
+    checksum ^= (uint32_t)(screenshot->magic & 0xFFFFFFFF);
+    checksum ^= (uint32_t)(screenshot->size >> 32);
+    checksum ^= (uint32_t)(screenshot->size & 0xFFFFFFFF);
+    checksum ^= screenshot->width;
+    checksum ^= screenshot->height;
+    checksum ^= screenshot->bytes_per_row;
+    
+    // Include format string in checksum
+    for (int i = 0; i < 16 && screenshot->format[i]; i++) {
+        checksum ^= (uint32_t)screenshot->format[i] << (8 * (i % 4));
+    }
+    
+    return checksum;
+}
+
+idb_error_t idb_shm_validate_screenshot(const idb_shm_screenshot_t* screenshot) {
+    if (!screenshot) {
+        return IDB_ERROR_INVALID_PARAMETER;
+    }
+    
+    // Check magic header
+    if (screenshot->magic != IDB_SHM_MAGIC_HEADER) {
+        NSLog(@"idb_shm: Invalid magic header 0x%llx (expected 0x%llx)", 
+              screenshot->magic, IDB_SHM_MAGIC_HEADER);
+        return IDB_ERROR_INVALID_PARAMETER;
+    }
+    
+    // Check size bounds
+    if (screenshot->size < IDB_SHM_MIN_SIZE || screenshot->size > IDB_SHM_MAX_SIZE) {
+        NSLog(@"idb_shm: Invalid size %zu (min: %d, max: %d)", 
+              screenshot->size, IDB_SHM_MIN_SIZE, IDB_SHM_MAX_SIZE);
+        return IDB_ERROR_INVALID_PARAMETER;
+    }
+    
+    // Check dimensions are reasonable
+    if (screenshot->width == 0 || screenshot->height == 0 || 
+        screenshot->width > 8192 || screenshot->height > 8192) {
+        NSLog(@"idb_shm: Invalid dimensions %ux%u", screenshot->width, screenshot->height);
+        return IDB_ERROR_INVALID_PARAMETER;
+    }
+    
+    // Check bytes per row makes sense
+    uint32_t min_bytes_per_row = screenshot->width * 3; // RGB minimum
+    uint32_t max_bytes_per_row = screenshot->width * 4; // RGBA maximum
+    if (screenshot->bytes_per_row < min_bytes_per_row || screenshot->bytes_per_row > max_bytes_per_row) {
+        NSLog(@"idb_shm: Invalid bytes_per_row %u (expected %u-%u for width %u)", 
+              screenshot->bytes_per_row, min_bytes_per_row, max_bytes_per_row, screenshot->width);
+        return IDB_ERROR_INVALID_PARAMETER;
+    }
+    
+    // Check total size matches dimensions
+    size_t expected_size = screenshot->bytes_per_row * screenshot->height;
+    if (screenshot->size < expected_size) {
+        NSLog(@"idb_shm: Size %zu too small for dimensions (expected at least %zu)", 
+              screenshot->size, expected_size);
+        return IDB_ERROR_INVALID_PARAMETER;
+    }
+    
+    // Verify checksum
+    uint32_t calculated_checksum = idb_shm_calculate_checksum(screenshot);
+    if (screenshot->checksum != calculated_checksum) {
+        NSLog(@"idb_shm: Checksum mismatch 0x%x (expected 0x%x)", 
+              screenshot->checksum, calculated_checksum);
+        return IDB_ERROR_INVALID_PARAMETER;
+    }
+    
+    // Check base address is valid
+    if (!screenshot->base_address) {
+        NSLog(@"idb_shm: Invalid base address");
+        return IDB_ERROR_INVALID_PARAMETER;
+    }
+    
+    // Check format string is null-terminated
+    bool format_terminated = false;
+    for (int i = 0; i < 16; i++) {
+        if (screenshot->format[i] == '\0') {
+            format_terminated = true;
+            break;
+        }
+    }
+    if (!format_terminated) {
+        NSLog(@"idb_shm: Format string not null-terminated");
+        return IDB_ERROR_INVALID_PARAMETER;
+    }
+    
+    return IDB_SUCCESS;
 }
 
 #pragma mark - Screenshot Operations
@@ -197,7 +316,10 @@ idb_error_t idb_take_screenshot_shm(idb_shm_screenshot_t* screenshot) {
         }
         
         // Get screenshot data
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
         NSData* imageData = [device performSelector:screenshotSelector];
+#pragma clang diagnostic pop
         if (!imageData) {
             return IDB_ERROR_OPERATION_FAILED;
         }
@@ -270,7 +392,8 @@ idb_error_t idb_take_screenshot_shm(idb_shm_screenshot_t* screenshot) {
         
         CGImageRelease(image);
         
-        // Fill in screenshot info
+        // Fill in screenshot info with validation
+        screenshot->magic = IDB_SHM_MAGIC_HEADER;
         screenshot->handle = handle;
         screenshot->base_address = base_address;
         screenshot->size = size;
@@ -287,6 +410,18 @@ idb_error_t idb_take_screenshot_shm(idb_shm_screenshot_t* screenshot) {
             strlcpy(screenshot->format, "UNKNOWN", sizeof(screenshot->format));
         }
         
+        // Calculate and set checksum
+        screenshot->checksum = idb_shm_calculate_checksum(screenshot);
+        
+        // Validate the complete structure
+        err = idb_shm_validate_screenshot(screenshot);
+        if (err != IDB_SUCCESS) {
+            NSLog(@"idb_shm: Screenshot validation failed");
+            idb_shm_detach(base_address);
+            idb_shm_destroy(handle);
+            return err;
+        }
+        
         return IDB_SUCCESS;
     }
 }
@@ -294,6 +429,11 @@ idb_error_t idb_take_screenshot_shm(idb_shm_screenshot_t* screenshot) {
 void idb_free_screenshot_shm(idb_shm_screenshot_t* screenshot) {
     if (!screenshot) {
         return;
+    }
+    
+    // Validate before freeing (log warning if invalid)
+    if (idb_shm_validate_screenshot(screenshot) != IDB_SUCCESS) {
+        NSLog(@"idb_shm: Warning - freeing invalid screenshot structure");
     }
     
     if (screenshot->base_address) {
@@ -305,6 +445,10 @@ void idb_free_screenshot_shm(idb_shm_screenshot_t* screenshot) {
         idb_shm_destroy(screenshot->handle);
         screenshot->handle = NULL;
     }
+    
+    // Clear magic header to prevent reuse
+    screenshot->magic = 0;
+    screenshot->checksum = 0;
 }
 
 #pragma mark - Screenshot Streaming
@@ -352,8 +496,14 @@ idb_error_t idb_screenshot_stream_shm(idb_screenshot_shm_callback callback, void
         // Take new screenshot
         idb_error_t err = idb_take_screenshot_shm(g_current_screenshot);
         if (err == IDB_SUCCESS) {
-            // Call callback with screenshot
-            g_screenshot_callback(g_current_screenshot, g_screenshot_context);
+            // Validate screenshot before callback
+            err = idb_shm_validate_screenshot(g_current_screenshot);
+            if (err == IDB_SUCCESS) {
+                // Call callback with validated screenshot
+                g_screenshot_callback(g_current_screenshot, g_screenshot_context);
+            } else {
+                NSLog(@"idb_shm: Screenshot validation failed: %s", idb_error_string(err));
+            }
         } else {
             NSLog(@"idb_shm: Screenshot failed: %s", idb_error_string(err));
         }

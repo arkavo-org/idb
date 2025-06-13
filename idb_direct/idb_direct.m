@@ -6,6 +6,7 @@
 #import <FBSimulatorControl/FBSimulatorHID.h>
 #import <FBSimulatorControl/FBSimulatorIndigoHID.h>
 #import <FBDeviceControl/FBDeviceControl.h>
+#import <stdatomic.h>
 #import "idb_direct.h"
 
 // Global state (thread-safe)
@@ -15,7 +16,7 @@ static struct {
     FBSimulatorControl* simulator_control;
     FBDeviceControl* device_control;
     NSMutableDictionary* error_messages;
-    BOOL initialized;
+    _Atomic(BOOL) initialized;
 } g_idb_state = {0};
 
 // Macro for thread-safe operations
@@ -27,7 +28,7 @@ static struct {
     })
 
 #define IDB_CHECK_INITIALIZED() \
-    if (!g_idb_state.initialized) { \
+    if (!atomic_load(&g_idb_state.initialized)) { \
         return IDB_ERROR_NOT_INITIALIZED; \
     }
 
@@ -72,7 +73,7 @@ idb_error_t idb_initialize(void) {
                 g_idb_state.device_control = [FBDeviceControl.defaultControl startWithError:nil];
             }
             
-            g_idb_state.initialized = YES;
+            atomic_store(&g_idb_state.initialized, YES);
         });
     });
     
@@ -89,7 +90,7 @@ idb_error_t idb_shutdown(void) {
         
         g_idb_state.simulator_control = nil;
         g_idb_state.device_control = nil;
-        g_idb_state.initialized = NO;
+        atomic_store(&g_idb_state.initialized, NO);
     });
     
     return IDB_SUCCESS;
@@ -261,6 +262,12 @@ idb_error_t idb_take_screenshot(idb_screenshot_t* screenshot) {
         
         memcpy(screenshot->data, imageData.bytes, screenshot->size);
         screenshot->format = strdup("png");
+        if (!screenshot->format) {
+            free(screenshot->data);
+            screenshot->data = NULL;
+            result = IDB_ERROR_OUT_OF_MEMORY;
+            return;
+        }
         
         // Get dimensions (simplified - would need proper PNG parsing)
         screenshot->width = 0;

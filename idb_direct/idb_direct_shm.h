@@ -11,15 +11,22 @@ extern "C" {
 // Shared memory handle
 typedef struct idb_shm_handle* idb_shm_handle_t;
 
-// Shared memory screenshot info
+// Magic header for shared memory validation
+#define IDB_SHM_MAGIC_HEADER 0x49444253484D0001ULL  // "IDBSHM" + version
+#define IDB_SHM_MAX_SIZE (128 * 1024 * 1024)        // 128MB max
+#define IDB_SHM_MIN_SIZE 1024                        // 1KB min
+
+// Shared memory screenshot info with validation
 typedef struct {
+    uint64_t magic;           // Magic header for validation
     idb_shm_handle_t handle;
     void* base_address;
     size_t size;
     uint32_t width;
     uint32_t height;
     uint32_t bytes_per_row;
-    char format[16]; // "BGRA", "RGB", etc.
+    char format[16];          // "BGRA", "RGB", etc.
+    uint32_t checksum;        // Simple checksum for integrity
 } idb_shm_screenshot_t;
 
 // Shared memory operations
@@ -39,6 +46,10 @@ idb_error_t idb_screenshot_stream_stop(void);
 
 // Get shared memory key for cross-process access
 const char* idb_shm_get_key(idb_shm_handle_t handle);
+
+// Validation functions
+idb_error_t idb_shm_validate_screenshot(const idb_shm_screenshot_t* screenshot);
+uint32_t idb_shm_calculate_checksum(const idb_shm_screenshot_t* screenshot);
 
 #ifdef __cplusplus
 }

@@ -315,6 +315,11 @@ idb_error_t idb_take_screenshot(idb_screenshot_t* screenshot) {
         
         memcpy(screenshot->data, imageData.bytes, screenshot->size);
         screenshot->format = strdup("png");
+        if (!screenshot->format) {
+            free(screenshot->data);
+            screenshot->data = NULL;
+            return IDB_ERROR_OUT_OF_MEMORY;
+        }
         screenshot->width = 0;  // Would need to parse PNG header
         screenshot->height = 0;
         

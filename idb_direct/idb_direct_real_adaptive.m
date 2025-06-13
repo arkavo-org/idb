@@ -2,6 +2,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
+#import <stdatomic.h>
 #import "idb_direct.h"
 
 // We'll use runtime APIs to interact with SimulatorKit
@@ -11,12 +12,32 @@ static Class SimDeviceSetClass = nil;
 // Global state
 static struct {
     id current_device;  // SimDevice instance
-    BOOL initialized;
+    _Atomic(BOOL) initialized;
+    dispatch_queue_t sync_queue;
 } g_idb_state = {0};
+
+// Thread-safe synchronization macros
+#define IDB_SYNC_INIT() \
+    static dispatch_once_t once; \
+    dispatch_once(&once, ^{ \
+        g_idb_state.sync_queue = dispatch_queue_create("com.arkavo.idb_adaptive_sync", DISPATCH_QUEUE_SERIAL); \
+    })
+
+#define IDB_SYNCHRONIZED(block) \
+    IDB_SYNC_INIT(); \
+    dispatch_sync(g_idb_state.sync_queue, ^{ \
+        @autoreleasepool { \
+            block \
+        } \
+    })
 
 // Export helper for shared memory implementation
 id g_idb_state_current_device(void) {
-    return g_idb_state.current_device;
+    __block id device = nil;
+    IDB_SYNCHRONIZED({
+        device = g_idb_state.current_device;
+    });
+    return device;
 }
 
 // Error string storage
@@ -60,21 +81,25 @@ idb_error_t idb_initialize(void) {
         return IDB_ERROR_OPERATION_FAILED;
     }
     
-    g_idb_state.initialized = YES;
-    NSLog(@"idb_direct: initialized successfully");
+    IDB_SYNCHRONIZED({
+        atomic_store(&g_idb_state.initialized, YES);
+        NSLog(@"idb_direct: initialized successfully");
+    });
     return IDB_SUCCESS;
 }
 
 idb_error_t idb_shutdown(void) {
-    if (g_idb_state.current_device) {
-        g_idb_state.current_device = nil;
-    }
-    g_idb_state.initialized = NO;
+    IDB_SYNCHRONIZED({
+        if (g_idb_state.current_device) {
+            g_idb_state.current_device = nil;
+        }
+        atomic_store(&g_idb_state.initialized, NO);
+    });
     return IDB_SUCCESS;
 }
 
 idb_error_t idb_connect_target(const char* udid, idb_target_type_t type) {
-    if (!g_idb_state.initialized) {
+    if (!atomic_load(&g_idb_state.initialized)) {
         return IDB_ERROR_NOT_INITIALIZED;
     }
     
@@ -82,50 +107,73 @@ idb_error_t idb_connect_target(const char* udid, idb_target_type_t type) {
         return IDB_ERROR_INVALID_PARAMETER;
     }
     
-    @autoreleasepool {
-        NSString* targetUdid = [NSString stringWithUTF8String:udid];
-        
-        // Get default device set
-        SEL defaultSetSelector = NSSelectorFromString(@"defaultSet");
-        id deviceSet = [SimDeviceSetClass performSelector:defaultSetSelector];
-        
-        if (!deviceSet) {
-            NSLog(@"Failed to get default device set");
-            return IDB_ERROR_OPERATION_FAILED;
-        }
-        
-        // Get all devices
-        SEL devicesSelector = NSSelectorFromString(@"devices");
-        NSArray* devices = [deviceSet performSelector:devicesSelector];
-        
-        // Find our target device
-        for (id device in devices) {
-            SEL udidSelector = NSSelectorFromString(@"UDID");
-            NSUUID* deviceUDID = [device performSelector:udidSelector];
-            
-            if ([deviceUDID.UUIDString isEqualToString:targetUdid] || 
-                [targetUdid isEqualToString:@"booted"]) {
-                // Check if booted
-                SEL stateSelector = NSSelectorFromString(@"state");
-                NSInteger state = [[device performSelector:stateSelector] integerValue];
-                
-                if (state != 3) { // Booted state
-                    NSLog(@"Simulator is not booted (state: %ld)", state);
-                    return IDB_ERROR_SIMULATOR_NOT_RUNNING;
-                }
-                
-                g_idb_state.current_device = device;
-                NSLog(@"Connected to simulator: %@", deviceUDID.UUIDString);
-                return IDB_SUCCESS;
-            }
-        }
-    }
+    __block idb_error_t result = IDB_SUCCESS;
     
-    return IDB_ERROR_DEVICE_NOT_FOUND;
+    IDB_SYNCHRONIZED({
+        @autoreleasepool {
+            NSString* targetUdid = [NSString stringWithUTF8String:udid];
+            
+            // Get default device set
+            SEL defaultSetSelector = NSSelectorFromString(@"defaultSet");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id deviceSet = [SimDeviceSetClass performSelector:defaultSetSelector];
+#pragma clang diagnostic pop
+            
+            if (!deviceSet) {
+                NSLog(@"Failed to get default device set");
+                result = IDB_ERROR_OPERATION_FAILED;
+                return;
+            }
+            
+            // Get all devices
+            SEL devicesSelector = NSSelectorFromString(@"devices");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            NSArray* devices = [deviceSet performSelector:devicesSelector];
+#pragma clang diagnostic pop
+            
+            // Find our target device
+            for (id device in devices) {
+                SEL udidSelector = NSSelectorFromString(@"UDID");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                NSUUID* deviceUDID = [device performSelector:udidSelector];
+#pragma clang diagnostic pop
+                
+                if ([deviceUDID.UUIDString isEqualToString:targetUdid] || 
+                    [targetUdid isEqualToString:@"booted"]) {
+                    // Check if booted
+                    SEL stateSelector = NSSelectorFromString(@"state");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                    NSInteger state = [[device performSelector:stateSelector] integerValue];
+#pragma clang diagnostic pop
+                    
+                    if (state != 3) { // Booted state
+                        NSLog(@"Simulator is not booted (state: %ld)", state);
+                        result = IDB_ERROR_SIMULATOR_NOT_RUNNING;
+                        return;
+                    }
+                    
+                    g_idb_state.current_device = device;
+                    NSLog(@"Connected to simulator: %@", deviceUDID.UUIDString);
+                    result = IDB_SUCCESS;
+                    return;
+                }
+            }
+            
+            result = IDB_ERROR_DEVICE_NOT_FOUND;
+        }
+    });
+    
+    return result;
 }
 
 idb_error_t idb_disconnect_target(void) {
-    g_idb_state.current_device = nil;
+    IDB_SYNCHRONIZED({
+        g_idb_state.current_device = nil;
+    });
     return IDB_SUCCESS;
 }
 
@@ -140,7 +188,12 @@ idb_error_t idb_tap(double x, double y) {
 
 // Simplified mouse event that works across Xcode versions
 static idb_error_t idb_mouse_event(double x, double y, BOOL down) {
-    if (!g_idb_state.current_device) {
+    __block id current_device = nil;
+    IDB_SYNCHRONIZED({
+        current_device = g_idb_state.current_device;
+    });
+    
+    if (!current_device) {
         return IDB_ERROR_DEVICE_NOT_FOUND;
     }
     
@@ -151,10 +204,10 @@ static idb_error_t idb_mouse_event(double x, double y, BOOL down) {
         
         // Approach 1: Try postMouseEvent selector (older API)
         SEL mouseEventSelector = NSSelectorFromString(@"postMouseEventWithType:x:y:");
-        if ([g_idb_state.current_device respondsToSelector:mouseEventSelector]) {
-            NSMethodSignature* sig = [g_idb_state.current_device methodSignatureForSelector:mouseEventSelector];
+        if ([current_device respondsToSelector:mouseEventSelector]) {
+            NSMethodSignature* sig = [current_device methodSignatureForSelector:mouseEventSelector];
             NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
-            [inv setTarget:g_idb_state.current_device];
+            [inv setTarget:current_device];
             [inv setSelector:mouseEventSelector];
             
             int eventType = down ? 1 : 2; // 1=down, 2=up
@@ -169,10 +222,10 @@ static idb_error_t idb_mouse_event(double x, double y, BOOL down) {
         
         // Approach 2: Try sendEventWithType (newer API)
         SEL sendEventSelector = NSSelectorFromString(@"sendEventWithType:path:error:");
-        if ([g_idb_state.current_device respondsToSelector:sendEventSelector]) {
-            NSMethodSignature* sig = [g_idb_state.current_device methodSignatureForSelector:sendEventSelector];
+        if ([current_device respondsToSelector:sendEventSelector]) {
+            NSMethodSignature* sig = [current_device methodSignatureForSelector:sendEventSelector];
             NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
-            [inv setTarget:g_idb_state.current_device];
+            [inv setTarget:current_device];
             [inv setSelector:sendEventSelector];
             
             NSString* eventType = @"touch";
@@ -198,8 +251,11 @@ static idb_error_t idb_mouse_event(double x, double y, BOOL down) {
         
         // Approach 3: Try HID interface
         SEL hidSelector = NSSelectorFromString(@"hid");
-        if ([g_idb_state.current_device respondsToSelector:hidSelector]) {
-            id hid = [g_idb_state.current_device performSelector:hidSelector];
+        if ([current_device respondsToSelector:hidSelector]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id hid = [current_device performSelector:hidSelector];
+#pragma clang diagnostic pop
             if (hid) {
                 // Try various HID methods
                 SEL tapSelector = NSSelectorFromString(@"tapAtX:y:");
@@ -233,8 +289,17 @@ idb_error_t idb_swipe(idb_point_t from, idb_point_t to, double duration_seconds)
 }
 
 idb_error_t idb_take_screenshot(idb_screenshot_t* screenshot) {
-    if (!screenshot || !g_idb_state.current_device) {
+    if (!screenshot) {
         return IDB_ERROR_INVALID_PARAMETER;
+    }
+    
+    __block id current_device = nil;
+    IDB_SYNCHRONIZED({
+        current_device = g_idb_state.current_device;
+    });
+    
+    if (!current_device) {
+        return IDB_ERROR_DEVICE_NOT_FOUND;
     }
     
     @autoreleasepool {
@@ -246,16 +311,19 @@ idb_error_t idb_take_screenshot(idb_screenshot_t* screenshot) {
         
         NSData* imageData = nil;
         
-        if ([g_idb_state.current_device respondsToSelector:screenshotSelector]) {
-            NSMethodSignature* sig = [g_idb_state.current_device methodSignatureForSelector:screenshotSelector];
+        if ([current_device respondsToSelector:screenshotSelector]) {
+            NSMethodSignature* sig = [current_device methodSignatureForSelector:screenshotSelector];
             NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
-            [inv setTarget:g_idb_state.current_device];
+            [inv setTarget:current_device];
             [inv setSelector:screenshotSelector];
             [inv setArgument:&error atIndex:2];
             [inv invoke];
             [inv getReturnValue:&imageData];
-        } else if ([g_idb_state.current_device respondsToSelector:screenshotSelectorNoError]) {
-            imageData = [g_idb_state.current_device performSelector:screenshotSelectorNoError];
+        } else if ([current_device respondsToSelector:screenshotSelectorNoError]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            imageData = [current_device performSelector:screenshotSelectorNoError];
+#pragma clang diagnostic pop
         }
         
         if (!imageData) {
@@ -271,6 +339,11 @@ idb_error_t idb_take_screenshot(idb_screenshot_t* screenshot) {
         memcpy(screenshot->data, imageData.bytes, imageData.length);
         screenshot->size = imageData.length;
         screenshot->format = strdup("png");
+        if (!screenshot->format) {
+            free(screenshot->data);
+            screenshot->data = NULL;
+            return IDB_ERROR_OUT_OF_MEMORY;
+        }
         
         // We don't have width/height without decoding the PNG
         screenshot->width = 0;
