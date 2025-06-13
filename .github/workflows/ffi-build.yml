@@ -68,6 +68,20 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-frameworks-
           
+    - name: Get static library cache key
+      id: static-lib-cache-key
+      run: |
+        # Create a hash of files that affect static library builds
+        echo "hash=$(find idb_direct CompanionLib IDBCompanionUtilities -name '*.m' -o -name '*.h' -o -name '*.swift' | sort | xargs cat | shasum -a 256 | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+        
+    - name: Cache static library
+      uses: actions/cache@v4
+      with:
+        path: build/lib
+        key: ${{ runner.os }}-static-lib-${{ steps.static-lib-cache-key.outputs.hash }}
+        restore-keys: |
+          ${{ runner.os }}-static-lib-
+          
     - name: Build frameworks
       run: |
         if [ ! -d "build/Build/Products/Debug/FBControlCore.framework" ]; then
@@ -79,8 +93,12 @@ jobs:
         
     - name: Build idb_direct static library
       run: |
-        echo "Building idb_direct static library..."
-        ./build_idb_direct.sh
+        if [ ! -f "build/lib/libidb_direct.a" ]; then
+          echo "Building idb_direct static library..."
+          ./build_idb_direct.sh
+        else
+          echo "Using cached static library"
+        fi
         
     - name: Build Direct FFI library
       run: |
