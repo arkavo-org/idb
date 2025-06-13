@@ -109,16 +109,15 @@ idb_error_t idb_connect_target(const char* udid, idb_target_type_t type) {
     
     __block idb_error_t result = IDB_SUCCESS;
     
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
     IDB_SYNCHRONIZED({
         @autoreleasepool {
             NSString* targetUdid = [NSString stringWithUTF8String:udid];
             
             // Get default device set
             SEL defaultSetSelector = NSSelectorFromString(@"defaultSet");
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             id deviceSet = [SimDeviceSetClass performSelector:defaultSetSelector];
-#pragma clang diagnostic pop
             
             if (!deviceSet) {
                 NSLog(@"Failed to get default device set");
@@ -128,27 +127,18 @@ idb_error_t idb_connect_target(const char* udid, idb_target_type_t type) {
             
             // Get all devices
             SEL devicesSelector = NSSelectorFromString(@"devices");
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             NSArray* devices = [deviceSet performSelector:devicesSelector];
-#pragma clang diagnostic pop
             
             // Find our target device
             for (id device in devices) {
                 SEL udidSelector = NSSelectorFromString(@"UDID");
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                 NSUUID* deviceUDID = [device performSelector:udidSelector];
-#pragma clang diagnostic pop
                 
                 if ([deviceUDID.UUIDString isEqualToString:targetUdid] || 
                     [targetUdid isEqualToString:@"booted"]) {
                     // Check if booted
                     SEL stateSelector = NSSelectorFromString(@"state");
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
                     NSInteger state = [[device performSelector:stateSelector] integerValue];
-#pragma clang diagnostic pop
                     
                     if (state != 3) { // Booted state
                         NSLog(@"Simulator is not booted (state: %ld)", state);
@@ -166,6 +156,7 @@ idb_error_t idb_connect_target(const char* udid, idb_target_type_t type) {
             result = IDB_ERROR_DEVICE_NOT_FOUND;
         }
     });
+#pragma clang diagnostic pop
     
     return result;
 }

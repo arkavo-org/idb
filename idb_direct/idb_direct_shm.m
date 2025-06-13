@@ -95,8 +95,8 @@ idb_error_t idb_shm_attach(idb_shm_handle_t handle, void** address) {
     
     // Bounds check the handle size
     if (handle->size < IDB_SHM_MIN_SIZE || handle->size > IDB_SHM_MAX_SIZE) {
-        NSLog(@"idb_shm: Invalid handle size %zu (min: %d, max: %d)", 
-              handle->size, IDB_SHM_MIN_SIZE, IDB_SHM_MAX_SIZE);
+        NSLog(@"idb_shm: Invalid handle size %llu (min: %d, max: %d)", 
+              (unsigned long long)handle->size, IDB_SHM_MIN_SIZE, IDB_SHM_MAX_SIZE);
         return IDB_ERROR_INVALID_PARAMETER;
     }
     
@@ -153,8 +153,8 @@ idb_error_t idb_shm_detach(void* address) {
     
     // Bounds check the region size
     if (size < IDB_SHM_MIN_SIZE || size > IDB_SHM_MAX_SIZE) {
-        NSLog(@"idb_shm: Invalid region size %zu during detach (min: %d, max: %d)", 
-              size, IDB_SHM_MIN_SIZE, IDB_SHM_MAX_SIZE);
+        NSLog(@"idb_shm: Invalid region size %llu during detach (min: %d, max: %d)", 
+              (unsigned long long)size, IDB_SHM_MIN_SIZE, IDB_SHM_MAX_SIZE);
         return IDB_ERROR_INVALID_PARAMETER;
     }
     
