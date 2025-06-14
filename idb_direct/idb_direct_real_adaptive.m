@@ -286,7 +286,104 @@ idb_error_t idb_disconnect_target(void) {
 static idb_error_t idb_mouse_event(double x, double y, BOOL down);
 
 idb_error_t idb_tap(double x, double y) {
-    // Use simple mouse event API that's more stable across versions
+    __block id current_device = nil;
+    IDB_SYNCHRONIZED({
+        current_device = g_idb_state.current_device;
+    });
+    
+    if (!current_device) {
+        return IDB_ERROR_DEVICE_NOT_FOUND;
+    }
+    
+    // For Xcode 16+, try to send a complete tap event via sendAccessibilityRequestAsync
+    SEL sendAccessibilitySelector = @selector(sendAccessibilityRequestAsync:completionQueue:completionHandler:);
+    NSLog(@"[DEBUG] Checking sendAccessibilityRequestAsync on device for tap");
+    if ([current_device respondsToSelector:sendAccessibilitySelector]) {
+        Class AXPTranslatorRequestClass = NSClassFromString(@"AXPTranslatorRequest");
+        if (AXPTranslatorRequestClass) {
+            id request = [[AXPTranslatorRequestClass alloc] init];
+            if (request) {
+                // Set request type to press
+                SEL setRequestTypeSelector = @selector(setRequestType:);
+                if ([request respondsToSelector:setRequestTypeSelector]) {
+                    NSInteger requestType = 1; // AXPTranslatorRequestTypePress
+                    NSMethodSignature* sig = [request methodSignatureForSelector:setRequestTypeSelector];
+                    NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
+                    [inv setTarget:request];
+                    [inv setSelector:setRequestTypeSelector];
+                    [inv setArgument:&requestType atIndex:2];
+                    [inv invoke];
+                }
+                
+                // Create event path for a complete tap (began | ended)
+                SEL setEventPathSelector = @selector(setEventPath:);
+                if ([request respondsToSelector:setEventPathSelector]) {
+                    NSMutableDictionary* tapEvent = [NSMutableDictionary dictionary];
+                    tapEvent[@"x"] = @(x);
+                    tapEvent[@"y"] = @(y);
+                    tapEvent[@"phase"] = @17; // 1 (began) | 16 (ended) = 17
+                    tapEvent[@"force"] = @1.0;
+                    tapEvent[@"timestamp"] = @([[NSDate date] timeIntervalSince1970]);
+                    
+                    NSArray* eventPath = @[tapEvent];
+                    
+                    NSMethodSignature* sig = [request methodSignatureForSelector:setEventPathSelector];
+                    NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
+                    [inv setTarget:request];
+                    [inv setSelector:setEventPathSelector];
+                    [inv setArgument:&eventPath atIndex:2];
+                    [inv invoke];
+                }
+                
+                // Send the request asynchronously
+                dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+                __block idb_error_t result = IDB_ERROR_OPERATION_FAILED;
+                
+                dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+                
+                NSMethodSignature* sig = [current_device methodSignatureForSelector:sendAccessibilitySelector];
+                NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
+                [inv setTarget:current_device];
+                [inv setSelector:sendAccessibilitySelector];
+                [inv setArgument:&request atIndex:2];
+                [inv setArgument:&queue atIndex:3];
+                
+                void (^completionHandler)(id) = ^(id response) {
+                    if (response) {
+                        SEL errorSelector = @selector(error);
+                        if ([response respondsToSelector:errorSelector]) {
+                            NSError* responseError = nil;
+                            NSMethodSignature* errorSig = [response methodSignatureForSelector:errorSelector];
+                            NSInvocation* errorInv = [NSInvocation invocationWithMethodSignature:errorSig];
+                            [errorInv setTarget:response];
+                            [errorInv setSelector:errorSelector];
+                            [errorInv invoke];
+                            [errorInv getReturnValue:&responseError];
+                            
+                            if (!responseError) {
+                                result = IDB_SUCCESS;
+                                NSLog(@"[DEBUG] Tap sent successfully via sendAccessibilityRequestAsync");
+                            }
+                        } else {
+                            result = IDB_SUCCESS;
+                            NSLog(@"[DEBUG] Tap sent successfully via sendAccessibilityRequestAsync");
+                        }
+                    }
+                    dispatch_semaphore_signal(semaphore);
+                };
+                
+                [inv setArgument:&completionHandler atIndex:4];
+                [inv invoke];
+                
+                dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC);
+                if (dispatch_semaphore_wait(semaphore, timeout) == 0 && result == IDB_SUCCESS) {
+                    return result;
+                }
+            }
+        }
+    }
+    
+    // Fall back to sending separate down/up events
     return idb_mouse_event(x, y, YES) == IDB_SUCCESS && 
            idb_mouse_event(x, y, NO) == IDB_SUCCESS ? IDB_SUCCESS : IDB_ERROR_OPERATION_FAILED;
 }
@@ -309,9 +406,132 @@ static idb_error_t idb_mouse_event(double x, double y, BOOL down) {
         
         // Try multiple approaches to send events
         
-        // Approach 1: Try accessibility-based touch events (most reliable for newer Xcode)
+        // Approach 1: Try sendAccessibilityRequestAsync (required for Xcode 16+)
+        SEL sendAccessibilitySelector = @selector(sendAccessibilityRequestAsync:completionQueue:completionHandler:);
+        NSLog(@"[DEBUG] Checking sendAccessibilityRequestAsync on device: %@", current_device);
+        
+        // List available methods on device for debugging
+        unsigned int methodCount = 0;
+        Method* methods = class_copyMethodList([current_device class], &methodCount);
+        NSLog(@"[DEBUG] Device class methods (%u):", methodCount);
+        for (unsigned int i = 0; i < MIN(20, methodCount); i++) {
+            SEL selector = method_getName(methods[i]);
+            NSLog(@"[DEBUG]   - %@", NSStringFromSelector(selector));
+        }
+        free(methods);
+        
+        if ([current_device respondsToSelector:sendAccessibilitySelector]) {
+            NSLog(@"[DEBUG] sendAccessibilityRequestAsync found on device");
+            
+            // Try to create AXPTranslatorRequest
+            Class AXPTranslatorRequestClass = NSClassFromString(@"AXPTranslatorRequest");
+            NSLog(@"[DEBUG] AXPTranslatorRequest class lookup: %@", AXPTranslatorRequestClass);
+            if (AXPTranslatorRequestClass) {
+                NSLog(@"[DEBUG] AXPTranslatorRequest class found");
+                
+                // Create request instance
+                id request = [[AXPTranslatorRequestClass alloc] init];
+                if (request) {
+                    // Set request type to press
+                    SEL setRequestTypeSelector = @selector(setRequestType:);
+                    if ([request respondsToSelector:setRequestTypeSelector]) {
+                        // AXPTranslatorRequestTypePress = 1
+                        NSInteger requestType = 1;
+                        NSMethodSignature* sig = [request methodSignatureForSelector:setRequestTypeSelector];
+                        NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
+                        [inv setTarget:request];
+                        [inv setSelector:setRequestTypeSelector];
+                        [inv setArgument:&requestType atIndex:2];
+                        [inv invoke];
+                    }
+                    
+                    // Create event path
+                    SEL setEventPathSelector = @selector(setEventPath:);
+                    if ([request respondsToSelector:setEventPathSelector]) {
+                        // Create event path array with touch event
+                        NSMutableDictionary* touchEvent = [NSMutableDictionary dictionary];
+                        touchEvent[@"x"] = @(x);
+                        touchEvent[@"y"] = @(y);
+                        touchEvent[@"phase"] = down ? @1 : @16; // 1=began, 16=ended
+                        touchEvent[@"force"] = @1.0;
+                        touchEvent[@"timestamp"] = @([[NSDate date] timeIntervalSince1970]);
+                        
+                        NSArray* eventPath = @[touchEvent];
+                        
+                        NSMethodSignature* sig = [request methodSignatureForSelector:setEventPathSelector];
+                        NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
+                        [inv setTarget:request];
+                        [inv setSelector:setEventPathSelector];
+                        [inv setArgument:&eventPath atIndex:2];
+                        [inv invoke];
+                    }
+                    
+                    // Send the request asynchronously
+                    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+                    __block idb_error_t result = IDB_ERROR_OPERATION_FAILED;
+                    
+                    dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+                    
+                    NSMethodSignature* sig = [current_device methodSignatureForSelector:sendAccessibilitySelector];
+                    NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
+                    [inv setTarget:current_device];
+                    [inv setSelector:sendAccessibilitySelector];
+                    [inv setArgument:&request atIndex:2];
+                    [inv setArgument:&queue atIndex:3];
+                    
+                    // Create completion block
+                    void (^completionHandler)(id) = ^(id response) {
+                        if (response) {
+                            NSLog(@"[DEBUG] Received AXPTranslatorResponse: %@", response);
+                            
+                            // Check if response indicates success
+                            SEL errorSelector = @selector(error);
+                            if ([response respondsToSelector:errorSelector]) {
+                                NSError* responseError = nil;
+                                NSMethodSignature* errorSig = [response methodSignatureForSelector:errorSelector];
+                                NSInvocation* errorInv = [NSInvocation invocationWithMethodSignature:errorSig];
+                                [errorInv setTarget:response];
+                                [errorInv setSelector:errorSelector];
+                                [errorInv invoke];
+                                [errorInv getReturnValue:&responseError];
+                                
+                                if (!responseError) {
+                                    result = IDB_SUCCESS;
+                                    NSLog(@"[DEBUG] Touch event sent successfully via sendAccessibilityRequestAsync");
+                                } else {
+                                    NSLog(@"[DEBUG] AXPTranslatorResponse error: %@", responseError);
+                                }
+                            } else {
+                                // No error method means success
+                                result = IDB_SUCCESS;
+                                NSLog(@"[DEBUG] Touch event sent successfully via sendAccessibilityRequestAsync");
+                            }
+                        } else {
+                            NSLog(@"[DEBUG] No response from sendAccessibilityRequestAsync");
+                        }
+                        dispatch_semaphore_signal(semaphore);
+                    };
+                    
+                    [inv setArgument:&completionHandler atIndex:4];
+                    [inv invoke];
+                    
+                    // Wait for completion with timeout
+                    dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC);
+                    if (dispatch_semaphore_wait(semaphore, timeout) == 0) {
+                        if (result == IDB_SUCCESS) {
+                            return result;
+                        }
+                    } else {
+                        NSLog(@"[DEBUG] sendAccessibilityRequestAsync timeout");
+                        return IDB_ERROR_TIMEOUT;
+                    }
+                }
+            }
+        }
+        
+        // Approach 2: Try legacy accessibility-based touch events
         if (AXPTranslatorClass) {
-            NSLog(@"[DEBUG] AXPTranslatorClass found");
+            NSLog(@"[DEBUG] Falling back to legacy AXPTranslator methods");
             SEL sharedInstanceSelector = @selector(sharedInstance);
             if ([AXPTranslatorClass respondsToSelector:sharedInstanceSelector]) {
                 NSLog(@"[DEBUG] sharedInstance selector found");
@@ -383,7 +603,7 @@ static idb_error_t idb_mouse_event(double x, double y, BOOL down) {
             NSLog(@"[DEBUG] AXPTranslatorClass not available");
         }
         
-        // Approach 2: Try postMouseEvent selector (older API)
+        // Approach 3: Try postMouseEvent selector (older API)
         SEL mouseEventSelector = NSSelectorFromString(@"postMouseEventWithType:x:y:");
         NSLog(@"[DEBUG] Checking postMouseEvent selector...");
         if ([current_device respondsToSelector:mouseEventSelector]) {
@@ -405,7 +625,7 @@ static idb_error_t idb_mouse_event(double x, double y, BOOL down) {
             NSLog(@"[DEBUG] postMouseEvent selector NOT found");
         }
         
-        // Approach 3: Try sendEventWithType (newer API)
+        // Approach 4: Try sendEventWithType (newer API)
         SEL sendEventSelector = NSSelectorFromString(@"sendEventWithType:path:error:");
         NSLog(@"[DEBUG] Checking sendEventWithType selector...");
         if ([current_device respondsToSelector:sendEventSelector]) {
@@ -440,7 +660,7 @@ static idb_error_t idb_mouse_event(double x, double y, BOOL down) {
             NSLog(@"[DEBUG] sendEventWithType selector NOT found");
         }
         
-        // Approach 4: Try HID interface
+        // Approach 5: Try HID interface
         SEL hidSelector = NSSelectorFromString(@"hid");
         if ([current_device respondsToSelector:hidSelector]) {
 #pragma clang diagnostic push
@@ -465,7 +685,7 @@ static idb_error_t idb_mouse_event(double x, double y, BOOL down) {
             }
         }
         
-        // Approach 5: Try device IO interface for touch events
+        // Approach 6: Try device IO interface for touch events
         SEL ioSelector = @selector(io);
         if ([current_device respondsToSelector:ioSelector]) {
 #pragma clang diagnostic push
@@ -491,8 +711,130 @@ idb_error_t idb_touch_event(idb_touch_type_t type, double x, double y) {
 }
 
 idb_error_t idb_swipe(idb_point_t from, idb_point_t to, double duration_seconds) {
-    NSLog(@"idb_direct: swipe not implemented");
-    return IDB_ERROR_NOT_IMPLEMENTED;
+    __block id current_device = nil;
+    IDB_SYNCHRONIZED({
+        current_device = g_idb_state.current_device;
+    });
+    
+    if (!current_device) {
+        return IDB_ERROR_DEVICE_NOT_FOUND;
+    }
+    
+    // For Xcode 16+, try to send a swipe event via sendAccessibilityRequestAsync
+    SEL sendAccessibilitySelector = @selector(sendAccessibilityRequestAsync:completionQueue:completionHandler:);
+    if ([current_device respondsToSelector:sendAccessibilitySelector]) {
+        Class AXPTranslatorRequestClass = NSClassFromString(@"AXPTranslatorRequest");
+        if (AXPTranslatorRequestClass) {
+            id request = [[AXPTranslatorRequestClass alloc] init];
+            if (request) {
+                // Set request type to press
+                SEL setRequestTypeSelector = @selector(setRequestType:);
+                if ([request respondsToSelector:setRequestTypeSelector]) {
+                    NSInteger requestType = 1; // AXPTranslatorRequestTypePress
+                    NSMethodSignature* sig = [request methodSignatureForSelector:setRequestTypeSelector];
+                    NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
+                    [inv setTarget:request];
+                    [inv setSelector:setRequestTypeSelector];
+                    [inv setArgument:&requestType atIndex:2];
+                    [inv invoke];
+                }
+                
+                // Create event path for swipe
+                SEL setEventPathSelector = @selector(setEventPath:);
+                if ([request respondsToSelector:setEventPathSelector]) {
+                    NSMutableArray* eventPath = [NSMutableArray array];
+                    
+                    // Calculate number of points for smooth swipe
+                    int numPoints = MAX(10, (int)(duration_seconds * 60)); // 60 points per second
+                    double dx = (to.x - from.x) / (numPoints - 1);
+                    double dy = (to.y - from.y) / (numPoints - 1);
+                    double dt = duration_seconds / (numPoints - 1);
+                    double startTime = [[NSDate date] timeIntervalSince1970];
+                    
+                    for (int i = 0; i < numPoints; i++) {
+                        NSMutableDictionary* event = [NSMutableDictionary dictionary];
+                        event[@"x"] = @(from.x + dx * i);
+                        event[@"y"] = @(from.y + dy * i);
+                        
+                        if (i == 0) {
+                            event[@"phase"] = @1; // began
+                        } else if (i == numPoints - 1) {
+                            event[@"phase"] = @16; // ended
+                        } else {
+                            event[@"phase"] = @2; // moved
+                        }
+                        
+                        event[@"force"] = @1.0;
+                        event[@"timestamp"] = @(startTime + dt * i);
+                        
+                        [eventPath addObject:event];
+                    }
+                    
+                    NSMethodSignature* sig = [request methodSignatureForSelector:setEventPathSelector];
+                    NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
+                    [inv setTarget:request];
+                    [inv setSelector:setEventPathSelector];
+                    [inv setArgument:&eventPath atIndex:2];
+                    [inv invoke];
+                }
+                
+                // Send the request asynchronously
+                dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+                __block idb_error_t result = IDB_ERROR_OPERATION_FAILED;
+                
+                dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+                
+                NSMethodSignature* sig = [current_device methodSignatureForSelector:sendAccessibilitySelector];
+                NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
+                [inv setTarget:current_device];
+                [inv setSelector:sendAccessibilitySelector];
+                [inv setArgument:&request atIndex:2];
+                [inv setArgument:&queue atIndex:3];
+                
+                void (^completionHandler)(id) = ^(id response) {
+                    if (response) {
+                        SEL errorSelector = @selector(error);
+                        if ([response respondsToSelector:errorSelector]) {
+                            NSError* responseError = nil;
+                            NSMethodSignature* errorSig = [response methodSignatureForSelector:errorSelector];
+                            NSInvocation* errorInv = [NSInvocation invocationWithMethodSignature:errorSig];
+                            [errorInv setTarget:response];
+                            [errorInv setSelector:errorSelector];
+                            [errorInv invoke];
+                            [errorInv getReturnValue:&responseError];
+                            
+                            if (!responseError) {
+                                result = IDB_SUCCESS;
+                                NSLog(@"[DEBUG] Swipe sent successfully via sendAccessibilityRequestAsync");
+                            }
+                        } else {
+                            result = IDB_SUCCESS;
+                            NSLog(@"[DEBUG] Swipe sent successfully via sendAccessibilityRequestAsync");
+                        }
+                    }
+                    dispatch_semaphore_signal(semaphore);
+                };
+                
+                [inv setArgument:&completionHandler atIndex:4];
+                [inv invoke];
+                
+                dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, (duration_seconds + 5) * NSEC_PER_SEC);
+                if (dispatch_semaphore_wait(semaphore, timeout) == 0 && result == IDB_SUCCESS) {
+                    return result;
+                }
+            }
+        }
+    }
+    
+    // Fall back to simple implementation using touch down, move, up
+    idb_error_t error = idb_touch_event(IDB_TOUCH_DOWN, from.x, from.y);
+    if (error != IDB_SUCCESS) return error;
+    
+    // Sleep for duration
+    [NSThread sleepForTimeInterval:duration_seconds];
+    
+    error = idb_touch_event(IDB_TOUCH_UP, to.x, to.y);
+    return error;
 }
 
 idb_error_t idb_take_screenshot(idb_screenshot_t* screenshot) {
