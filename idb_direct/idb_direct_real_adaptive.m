@@ -9,10 +9,13 @@
 // We'll use runtime APIs to interact with SimulatorKit
 static Class SimDeviceClass = nil;
 static Class SimDeviceSetClass = nil;
+static Class SimDeviceLegacyClientClass = nil;
+static Class AXPTranslatorClass = nil;
 
 // Global state
 static struct {
     id current_device;  // SimDevice instance
+    id legacy_client;   // SimDeviceLegacyClient instance for HID
     _Atomic(BOOL) initialized;
     dispatch_queue_t sync_queue;
 } g_idb_state = {0};
@@ -59,17 +62,40 @@ static BOOL load_simulator_kit(void) {
     
     dispatch_once(&once, ^{
         // Load CoreSimulator framework
-        void* handle = dlopen("/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator", RTLD_LAZY);
-        if (!handle) {
+        void* coreSimHandle = dlopen("/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator", RTLD_LAZY);
+        if (!coreSimHandle) {
             NSLog(@"Failed to load CoreSimulator.framework");
             return;
         }
         
+        // Load SimulatorKit framework for legacy HID support
+        void* simKitHandle = dlopen("/Library/Developer/PrivateFrameworks/SimulatorKit.framework/SimulatorKit", RTLD_LAZY);
+        if (!simKitHandle) {
+            NSLog(@"Warning: Failed to load SimulatorKit.framework - some features may be limited");
+        }
+        
+        // Load Accessibility framework for alternative touch method
+        void* axHandle = dlopen("/System/Library/PrivateFrameworks/AccessibilityPlatformTranslation.framework/AccessibilityPlatformTranslation", RTLD_LAZY);
+        if (!axHandle) {
+            NSLog(@"Warning: Failed to load AccessibilityPlatformTranslation.framework");
+        }
+        
         SimDeviceClass = NSClassFromString(@"SimDevice");
         SimDeviceSetClass = NSClassFromString(@"SimDeviceSet");
+        SimDeviceLegacyClientClass = NSClassFromString(@"SimulatorKit.SimDeviceLegacyHIDClient");
+        if (!SimDeviceLegacyClientClass) {
+            SimDeviceLegacyClientClass = NSClassFromString(@"SimDeviceLegacyHIDClient");
+        }
+        AXPTranslatorClass = NSClassFromString(@"AXPTranslator_iOS");
         
         if (SimDeviceClass && SimDeviceSetClass) {
             NSLog(@"Successfully loaded CoreSimulator classes");
+            if (SimDeviceLegacyClientClass) {
+                NSLog(@"Legacy HID client class available");
+            }
+            if (AXPTranslatorClass) {
+                NSLog(@"Accessibility translator class available");
+            }
             loaded = YES;
         }
     });
@@ -93,6 +119,9 @@ idb_error_t idb_shutdown(void) {
     IDB_SYNCHRONIZED({
         if (g_idb_state.current_device) {
             g_idb_state.current_device = nil;
+        }
+        if (g_idb_state.legacy_client) {
+            g_idb_state.legacy_client = nil;
         }
         atomic_store(&g_idb_state.initialized, NO);
     });
@@ -205,6 +234,32 @@ idb_error_t idb_connect_target(const char* udid, idb_target_type_t type) {
                     }
                     
                     g_idb_state.current_device = device;
+                    
+                    // Try to create legacy HID client for better compatibility
+                    if (SimDeviceLegacyClientClass) {
+                        NSError *error = nil;
+                        SEL initSelector = @selector(initWithDevice:error:);
+                        if ([SimDeviceLegacyClientClass instancesRespondToSelector:initSelector]) {
+                            // Create invocation to handle error parameter properly
+                            NSMethodSignature* sig = [SimDeviceLegacyClientClass instanceMethodSignatureForSelector:initSelector];
+                            NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
+                            [inv setTarget:[SimDeviceLegacyClientClass alloc]];
+                            [inv setSelector:initSelector];
+                            [inv setArgument:&device atIndex:2];
+                            [inv setArgument:&error atIndex:3];
+                            [inv invoke];
+                            
+                            __unsafe_unretained id legacyClient = nil;
+                            [inv getReturnValue:&legacyClient];
+                            if (legacyClient) {
+                                g_idb_state.legacy_client = legacyClient;
+                                NSLog(@"Created legacy HID client successfully");
+                            } else {
+                                NSLog(@"Failed to create legacy HID client: %@", error);
+                            }
+                        }
+                    }
+                    
                     NSLog(@"Connected to simulator: %@", deviceUDID.UUIDString);
                     result = IDB_SUCCESS;
                     return;
@@ -222,6 +277,7 @@ idb_error_t idb_connect_target(const char* udid, idb_target_type_t type) {
 idb_error_t idb_disconnect_target(void) {
     IDB_SYNCHRONIZED({
         g_idb_state.current_device = nil;
+        g_idb_state.legacy_client = nil;
     });
     return IDB_SUCCESS;
 }
@@ -235,11 +291,13 @@ idb_error_t idb_tap(double x, double y) {
            idb_mouse_event(x, y, NO) == IDB_SUCCESS ? IDB_SUCCESS : IDB_ERROR_OPERATION_FAILED;
 }
 
-// Simplified mouse event that works across Xcode versions
+// Enhanced touch event implementation with multiple approaches
 static idb_error_t idb_mouse_event(double x, double y, BOOL down) {
     __block id current_device = nil;
+    __block id legacy_client = nil;
     IDB_SYNCHRONIZED({
         current_device = g_idb_state.current_device;
+        legacy_client = g_idb_state.legacy_client;
     });
     
     if (!current_device) {
@@ -251,9 +309,85 @@ static idb_error_t idb_mouse_event(double x, double y, BOOL down) {
         
         // Try multiple approaches to send events
         
-        // Approach 1: Try postMouseEvent selector (older API)
+        // Approach 1: Try accessibility-based touch events (most reliable for newer Xcode)
+        if (AXPTranslatorClass) {
+            NSLog(@"[DEBUG] AXPTranslatorClass found");
+            SEL sharedInstanceSelector = @selector(sharedInstance);
+            if ([AXPTranslatorClass respondsToSelector:sharedInstanceSelector]) {
+                NSLog(@"[DEBUG] sharedInstance selector found");
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                id translator = [AXPTranslatorClass performSelector:sharedInstanceSelector];
+#pragma clang diagnostic pop
+                
+                if (translator) {
+                    NSLog(@"[DEBUG] Got translator instance: %@", translator);
+                    SEL pressEventSelector = @selector(_sendPressFingerEvent:location:force:contextId:);
+                    if ([translator respondsToSelector:pressEventSelector]) {
+                        NSLog(@"[DEBUG] _sendPressFingerEvent selector found");
+                        NSMethodSignature* sig = [translator methodSignatureForSelector:pressEventSelector];
+                        if (sig && sig.numberOfArguments >= 6) {
+                            NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
+                            [inv setTarget:translator];
+                            [inv setSelector:pressEventSelector];
+                            
+                            BOOL pressed = down;
+                            CGPoint location = CGPointMake(x, y);
+                            double force = 1.0;
+                            unsigned int contextId = 0;
+                            
+                            [inv setArgument:&pressed atIndex:2];
+                            [inv setArgument:&location atIndex:3];
+                            [inv setArgument:&force atIndex:4];
+                            [inv setArgument:&contextId atIndex:5];
+                            [inv invoke];
+                            
+                            NSLog(@"[DEBUG] Sent touch via accessibility translator");
+                            return IDB_SUCCESS;
+                        }
+                    } else {
+                        NSLog(@"[DEBUG] _sendPressFingerEvent selector NOT found on translator");
+                        // Try alternative method
+                        SEL simulatePressSelector = @selector(simulatePressAtPoint:withContextId:withDelay:withForce:);
+                        if ([translator respondsToSelector:simulatePressSelector]) {
+                            NSLog(@"[DEBUG] simulatePressAtPoint selector found");
+                            NSMethodSignature* sig2 = [translator methodSignatureForSelector:simulatePressSelector];
+                            if (sig2 && sig2.numberOfArguments >= 6) {
+                                NSInvocation* inv2 = [NSInvocation invocationWithMethodSignature:sig2];
+                                [inv2 setTarget:translator];
+                                [inv2 setSelector:simulatePressSelector];
+                                
+                                CGPoint location = CGPointMake(x, y);
+                                unsigned int contextId = 0;
+                                float delay = 0.0f;
+                                double force = 1.0;
+                                
+                                [inv2 setArgument:&location atIndex:2];
+                                [inv2 setArgument:&contextId atIndex:3];
+                                [inv2 setArgument:&delay atIndex:4];
+                                [inv2 setArgument:&force atIndex:5];
+                                [inv2 invoke];
+                                
+                                NSLog(@"[DEBUG] Sent touch via simulatePressAtPoint");
+                                return IDB_SUCCESS;
+                            }
+                        }
+                    }
+                } else {
+                    NSLog(@"[DEBUG] Failed to get translator instance");
+                }
+            } else {
+                NSLog(@"[DEBUG] sharedInstance selector NOT found on AXPTranslatorClass");
+            }
+        } else {
+            NSLog(@"[DEBUG] AXPTranslatorClass not available");
+        }
+        
+        // Approach 2: Try postMouseEvent selector (older API)
         SEL mouseEventSelector = NSSelectorFromString(@"postMouseEventWithType:x:y:");
+        NSLog(@"[DEBUG] Checking postMouseEvent selector...");
         if ([current_device respondsToSelector:mouseEventSelector]) {
+            NSLog(@"[DEBUG] postMouseEvent selector found");
             NSMethodSignature* sig = [current_device methodSignatureForSelector:mouseEventSelector];
             NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
             [inv setTarget:current_device];
@@ -265,13 +399,17 @@ static idb_error_t idb_mouse_event(double x, double y, BOOL down) {
             [inv setArgument:&y atIndex:4];
             [inv invoke];
             
-            NSLog(@"Sent mouse event via postMouseEvent");
+            NSLog(@"[DEBUG] Sent mouse event via postMouseEvent");
             return IDB_SUCCESS;
+        } else {
+            NSLog(@"[DEBUG] postMouseEvent selector NOT found");
         }
         
-        // Approach 2: Try sendEventWithType (newer API)
+        // Approach 3: Try sendEventWithType (newer API)
         SEL sendEventSelector = NSSelectorFromString(@"sendEventWithType:path:error:");
+        NSLog(@"[DEBUG] Checking sendEventWithType selector...");
         if ([current_device respondsToSelector:sendEventSelector]) {
+            NSLog(@"[DEBUG] sendEventWithType selector found");
             NSMethodSignature* sig = [current_device methodSignatureForSelector:sendEventSelector];
             NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
             [inv setTarget:current_device];
@@ -293,12 +431,16 @@ static idb_error_t idb_mouse_event(double x, double y, BOOL down) {
             [inv getReturnValue:&result];
             
             if (result) {
-                NSLog(@"Sent touch event via sendEventWithType");
+                NSLog(@"[DEBUG] Sent touch event via sendEventWithType");
                 return IDB_SUCCESS;
+            } else {
+                NSLog(@"[DEBUG] sendEventWithType returned NO, error: %@", error);
             }
+        } else {
+            NSLog(@"[DEBUG] sendEventWithType selector NOT found");
         }
         
-        // Approach 3: Try HID interface
+        // Approach 4: Try HID interface
         SEL hidSelector = NSSelectorFromString(@"hid");
         if ([current_device respondsToSelector:hidSelector]) {
 #pragma clang diagnostic push
@@ -319,6 +461,22 @@ static idb_error_t idb_mouse_event(double x, double y, BOOL down) {
                     
                     NSLog(@"Sent tap via HID interface");
                     return IDB_SUCCESS;
+                }
+            }
+        }
+        
+        // Approach 5: Try device IO interface for touch events
+        SEL ioSelector = @selector(io);
+        if ([current_device respondsToSelector:ioSelector]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id ioClient = [current_device performSelector:ioSelector];
+#pragma clang diagnostic pop
+            
+            if (ioClient) {
+                SEL sendEventSelector = @selector(sendEvent:completionQueue:completionHandler:);
+                if ([ioClient respondsToSelector:sendEventSelector]) {
+                    NSLog(@"Found sendEvent method on IO client");
                 }
             }
         }
@@ -353,12 +511,57 @@ idb_error_t idb_take_screenshot(idb_screenshot_t* screenshot) {
     
     @autoreleasepool {
         NSError* error = nil;
+        NSData* imageData = nil;
         
-        // Try different screenshot methods
+        // Approach 1: Try IO-based screenshot through display port
+        SEL ioSelector = @selector(io);
+        if ([current_device respondsToSelector:ioSelector]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+            id ioClient = [current_device performSelector:ioSelector];
+#pragma clang diagnostic pop
+            
+            if (ioClient) {
+                SEL ioPortsSelector = @selector(ioPorts);
+                if ([ioClient respondsToSelector:ioPortsSelector]) {
+                    NSArray* ioPorts = [ioClient performSelector:ioPortsSelector];
+                    for (id port in ioPorts) {
+                        // Check if this port has a display descriptor
+                        SEL descriptorSelector = @selector(descriptor);
+                        if ([port respondsToSelector:descriptorSelector]) {
+                            id descriptor = [port performSelector:descriptorSelector];
+                            if (descriptor) {
+                                // Check if this is a main display
+                                SEL stateSelector = @selector(state);
+                                if ([descriptor respondsToSelector:stateSelector]) {
+                                    id descriptorState = [descriptor performSelector:stateSelector];
+                                    SEL displayClassSelector = @selector(displayClass);
+                                    if ([descriptorState respondsToSelector:displayClassSelector]) {
+                                        NSMethodSignature* sig = [descriptorState methodSignatureForSelector:displayClassSelector];
+                                        NSInvocation* inv = [NSInvocation invocationWithMethodSignature:sig];
+                                        [inv setTarget:descriptorState];
+                                        [inv setSelector:displayClassSelector];
+                                        [inv invoke];
+                                        
+                                        unsigned short displayClass = 0;
+                                        [inv getReturnValue:&displayClass];
+                                        
+                                        if (displayClass == 0) { // Main display
+                                            NSLog(@"Found main display descriptor");
+                                            // Try to get screenshot from this display
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Approach 2: Try different screenshot methods
         SEL screenshotSelector = NSSelectorFromString(@"screenshotWithError:");
         SEL screenshotSelectorNoError = NSSelectorFromString(@"screenshot");
-        
-        NSData* imageData = nil;
         
         if ([current_device respondsToSelector:screenshotSelector]) {
             NSMethodSignature* sig = [current_device methodSignatureForSelector:screenshotSelector];
@@ -375,8 +578,23 @@ idb_error_t idb_take_screenshot(idb_screenshot_t* screenshot) {
 #pragma clang diagnostic pop
         }
         
+        // Approach 3: Try framebuffer-based screenshot
         if (!imageData) {
-            NSLog(@"Screenshot failed: %@", error);
+            SEL framebufferSelector = NSSelectorFromString(@"framebuffer");
+            if ([current_device respondsToSelector:framebufferSelector]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+                id framebuffer = [current_device performSelector:framebufferSelector];
+#pragma clang diagnostic pop
+                if (framebuffer) {
+                    NSLog(@"Found framebuffer object: %@", framebuffer);
+                    // Would need to extract image data from framebuffer
+                }
+            }
+        }
+        
+        if (!imageData) {
+            NSLog(@"Screenshot failed: %@", error ? error : @"No compatible screenshot API found");
             return IDB_ERROR_OPERATION_FAILED;
         }
         
@@ -394,9 +612,22 @@ idb_error_t idb_take_screenshot(idb_screenshot_t* screenshot) {
             return IDB_ERROR_OUT_OF_MEMORY;
         }
         
-        // We don't have width/height without decoding the PNG
+        // Try to get image dimensions from PNG data
         screenshot->width = 0;
         screenshot->height = 0;
+        
+        // Use Core Graphics to get dimensions from PNG data
+        CGDataProviderRef provider = CGDataProviderCreateWithData(NULL, imageData.bytes, imageData.length, NULL);
+        if (provider) {
+            CGImageRef image = CGImageCreateWithPNGDataProvider(provider, NULL, false, kCGRenderingIntentDefault);
+            if (image) {
+                screenshot->width = (uint32_t)CGImageGetWidth(image);
+                screenshot->height = (uint32_t)CGImageGetHeight(image);
+                NSLog(@"Screenshot dimensions: %dx%d", screenshot->width, screenshot->height);
+                CGImageRelease(image);
+            }
+            CGDataProviderRelease(provider);
+        }
         
         return IDB_SUCCESS;
     }
@@ -441,6 +672,6 @@ const char* idb_version(void) {
 #ifdef IDB_VERSION
     return IDB_VERSION;
 #else
-    return "0.1.0-adaptive";
+    return "0.1.0-adaptive-xcode16";
 #endif
 }
